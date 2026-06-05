@@ -1,8 +1,9 @@
 import streamlit as st
 import math
+import pandas as pd
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Kinetic Stopping Predictor - Cpt. Dialmy", page_icon="⚓", layout="wide")
+st.set_page_config(page_title="Advanced Stopping Predictor", page_icon="⚓", layout="wide")
 
 footer_style = """
     <style>
@@ -13,160 +14,173 @@ footer_style = """
     <div class="footer"><p>© 2026 - Développé par Cpt. Dialmy | Marine Pilot</p></div>
 """
 
-st.title("⚓ Kinetic Energy & Stopping Predictor")
-st.write("Analyse dynamique des forces d'arrêt, de l'inertie et de l'effet Shallow Water en milieu portuaire.")
-
-with st.expander("📚 Physique du Modèle (Work-Energy Theorem)"):
-    st.markdown("""
-    L'application repose sur le théorème de l'énergie cinétique : **L'énergie totale à dissiper doit être égale au travail des forces de freinage**.
-    * **Énergie Cinétique ($E_k$)** : Calculée avec la masse virtuelle (Déplacement + Masse d'eau entraînée).
-    * **Shallow Water Effect** : Si le ratio $h/T < 1.5$, la masse d'eau entraînée et la résistance de frottement augmentent drastiquement.
-    * **Temps d'arrêt** : Estimé via les équations de cinématique de base en assumant une décélération moyenne constante.
-    """)
+st.title("⚓ Advanced Kinetic Stopping Predictor")
+st.write("Simulateur d'arrêt avec intégration du vent, du courant, et du délai de réponse machine.")
 
 # --- SIDEBAR : PROFIL DU NAVIRE ---
 st.sidebar.header("🚢 Profil du Navire")
 type_navire = st.sidebar.selectbox("Type", ["Porte-conteneurs (Grand)", "Pétrolier / VLCC", "Méthanier (LNGC)", "Vraquier"])
 
-# Paramètres par défaut selon le type
 params = {
-    "Pétrolier / VLCC": (0.85, 330.0, 60.0, 20.0, 300000, 25000),
-    "Porte-conteneurs (Grand)": (0.65, 399.0, 59.0, 15.0, 200000, 60000),
-    "Méthanier (LNGC)": (0.75, 290.0, 46.0, 12.0, 100000, 30000),
-    "Vraquier": (0.82, 290.0, 45.0, 14.0, 120000, 15000)
+    "Pétrolier / VLCC": (0.85, 330.0, 60.0, 20.0, 300000, 25000, 0.8),
+    "Porte-conteneurs (Grand)": (0.65, 399.0, 59.0, 15.0, 200000, 60000, 2.5),
+    "Méthanier (LNGC)": (0.75, 290.0, 46.0, 12.0, 100000, 30000, 1.8),
+    "Vraquier": (0.82, 290.0, 45.0, 14.0, 120000, 15000, 1.0)
 }
-cb_def, lpp_def, b_def, t_def, disp_def, p_def = params.get(type_navire, params["Vraquier"])
+cb_def, lpp_def, b_def, t_def, disp_def, p_def, fardage_def = params.get(type_navire, params["Vraquier"])
 
-disp_t = st.sidebar.number_input("Déplacement Actuel (Tonnes)", value=disp_def, step=5000)
+disp_t = st.sidebar.number_input("Déplacement (Tonnes)", value=disp_def, step=5000)
 lpp = st.sidebar.number_input("Lpp (m)", value=lpp_def)
 breadth = st.sidebar.number_input("Largeur (m)", value=b_def)
 draft = st.sidebar.number_input("Tirant d'eau (m)", value=t_def)
 cb = st.sidebar.slider("Coefficient Cb", 0.50, 0.95, cb_def, step=0.01)
 
 puissance_moteur = st.sidebar.number_input("Puissance Moteur Max (kW)", value=p_def, step=1000)
-# Force astern estimée (Règle empirique standard)
 max_astern_t = (puissance_moteur * 0.45 / 100) * 1.0
 
-# --- MAIN DASHBOARD : LE SCÉNARIO ---
+# --- MAIN DASHBOARD : ENVIRONNEMENT ---
 st.header("🎯 Scénario & Environnement")
-
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    v_initiale = st.slider("Vitesse initiale (kn)", 1.0, 12.0, 5.0, step=0.1)
-    v_ms = v_initiale * 0.51444
-    dist_cible = st.number_input("Distance d'arrêt cible (m)", value=700.0, step=50.0)
+    v_sog_kn = st.slider("Vitesse Fond initiale SOG (kn)", 1.0, 12.0, 5.0, step=0.1)
+    v_sog_ms = v_sog_kn * 0.51444
+    dist_cible = st.number_input("Distance dispo. (m)", value=700, step=50)
 
 with col2:
-    profondeur = st.number_input("Profondeur d'eau (h en m)", value=draft * 1.2, min_value=draft * 1.01)
+    profondeur = st.number_input("Profondeur (m)", value=draft * 1.2, min_value=draft * 1.01)
     h_t_ratio = profondeur / draft
-    
     if h_t_ratio < 1.5:
-        st.warning(f"⚠️ **Shallow Water Actif** (h/T = {round(h_t_ratio, 2)})")
         added_mass_coef = 1.10 + 0.4 * (1.5 - h_t_ratio)
         drag_multiplier = 1.0 + 1.5 * (1.5 - h_t_ratio)
+        st.warning(f"⚠️ Shallow Water (h/T={h_t_ratio:.2f})")
     else:
-        st.success(f"🌊 **Deep Water** (h/T = {round(h_t_ratio, 2)})")
         added_mass_coef = 1.10
         drag_multiplier = 1.0
+        st.success(f"🌊 Deep Water (h/T={h_t_ratio:.2f})")
 
 with col3:
-    st.info("Bilan Énergétique (Masse Virtuelle)")
-    masse_virtuelle_kg = disp_t * 1000 * added_mass_coef
-    energie_joules = 0.5 * masse_virtuelle_kg * (v_ms**2)
-    st.metric("Énergie Cinétique à dissiper", f"{energie_joules / 1_000_000:.1f} MJ")
-    st.caption(f"Masse navire + {round((added_mass_coef - 1) * 100)}% d'eau entraînée")
+    courant_kn = st.number_input("Courant Face (+ Face / - Arrière)", value=0.0, step=0.5)
+    courant_ms = courant_kn * 0.51444
+    st.caption("Un courant face aide à freiner.")
+
+with col4:
+    vent_kn = st.number_input("Vent Face (+ Face / - Arrière)", value=0.0, step=5.0)
+    # Estimation de la force du vent en tonnes (simplifiée via facteur de fardage)
+    force_vent_t = (vent_kn / 10.0)**2 * fardage_def * (1 if vent_kn > 0 else -1)
+    st.caption(f"Fardage estimé : {force_vent_t:.1f} T")
 
 st.divider()
 
 # --- LES MOYENS D'ARRÊT ---
-st.subheader("🛑 Moyens d'Arrêt Configurables")
-c1, c2, c3, c4 = st.columns(4)
+st.subheader("🛑 Configuration du Freinage")
+c1, c2, c3 = st.columns(3)
 
 with c1:
-    st.markdown("**🌊 Traînée Coque**")
-    surface_mouillee = lpp * (breadth + 2 * draft)
-    c_t = (0.003 + (0.002 * cb)) * drag_multiplier
-    drag_max_n = 0.5 * 1025 * c_t * surface_mouillee * (v_ms**2)
-    drag_max_t = drag_max_n / 9806.65
-    drag_moyen_t = drag_max_t * 0.33 # Moyenne sur la décélération
-    st.metric("Frein Hydrodynamique", f"{drag_moyen_t:.1f} T")
-    st.caption("Friction moyenne estimée")
+    st.markdown("**⚙️ Machine (Astern)**")
+    delai_machine = st.slider("Délai de réponse (secondes)", 0, 180, 60, step=10, help="Temps avant que l'hélice ne batte en arrière.")
+    pct_machine = st.slider("Ordre Machine (% Astern)", 0, 100, 50, step=10)
+    force_machine_t = max_astern_t * (pct_machine / 100)
 
 with c2:
-    st.markdown("**⚙️ Machine (Astern)**")
-    moteur_dispo = st.toggle("Moteur Disponible", value=True)
-    if moteur_dispo:
-        pourcentage_machine = st.slider("Ordre Machine (% Astern)", 0, 100, 50, step=10)
-        force_machine_t = max_astern_t * (pourcentage_machine / 100)
-    else:
-        st.error("🚨 DEAD SHIP")
-        force_machine_t = 0.0
-    st.metric("Poussée Inversée", f"{force_machine_t:.1f} T")
-
-with c3:
     st.markdown("**🚜 Remorqueurs**")
     nb_tugs = st.number_input("Nb Tugs en freinage", 0, 4, 1)
     bp_tug = st.number_input("BP unitaire (T)", value=60)
     force_tugs_t = nb_tugs * bp_tug
-    st.metric("Force d'Escorte", f"{force_tugs_t:.1f} T")
 
-with c4:
+with c3:
     st.markdown("**⚓ Ancres**")
-    ancres = st.radio("Mouillage", ["Aucune", "1 Ancre (Draguée)", "2 Ancres"])
+    ancres = st.radio("Mouillage", ["Aucune", "1 Ancre (Draguée)", "2 Ancres"], horizontal=True)
     force_ancre_t = 0.0 if ancres == "Aucune" else (15.0 if ancres == "1 Ancre (Draguée)" else 30.0)
-    st.metric("Frein Ancres", f"{force_ancre_t:.1f} T")
+
+# --- MOTEUR PHYSIQUE (INTÉGRATION EULER) ---
+masse_virtuelle_kg = disp_t * 1000 * added_mass_coef
+surface_mouillee = lpp * (breadth + 2 * draft)
+c_t = (0.003 + (0.002 * cb)) * drag_multiplier
+
+# Variables de simulation
+v_actuelle_ms = v_sog_ms
+distance_parcourue = 0.0
+t_sec = 0
+dt = 1.0 # Pas de temps de 1 seconde
+historique = []
+
+while v_actuelle_ms > 0.05 and t_sec < 3600:
+    # Vitesse Surface (STW) pour la traînée
+    v_stw = max(0, v_actuelle_ms + courant_ms)
+    
+    # 1. Force Hydrodynamique (varie avec le carré de la vitesse)
+    drag_n = 0.5 * 1025 * c_t * surface_mouillee * (v_stw**2)
+    
+    # 2. Force Machine (Nulle si on est dans le délai de réponse)
+    engine_n = (force_machine_t * 9806.65) if t_sec >= delai_machine else 0.0
+    
+    # 3. Remorqueurs, Ancres et Vent (Forces constantes)
+    tugs_n = force_tugs_t * 9806.65
+    ancre_n = force_ancre_t * 9806.65
+    wind_n = force_vent_t * 9806.65
+    
+    # Force totale de freinage (Si négative = le vent arrière pousse plus fort qu'on ne freine)
+    total_braking_force_n = drag_n + engine_n + tugs_n + ancre_n + wind_n
+    
+    # Décélération a = F/m
+    decel_ms2 = total_braking_force_n / masse_virtuelle_kg
+    
+    # Mise à jour des vecteurs
+    v_actuelle_ms -= decel_ms2 * dt
+    distance_parcourue += v_actuelle_ms * dt
+    t_sec += dt
+    
+    # Enregistrement des données pour le graphique (toutes les 5 secondes)
+    if t_sec % 5 == 0:
+        historique.append({"Distance (m)": distance_parcourue, "Vitesse (noeuds)": max(0, v_actuelle_ms / 0.51444)})
+
+df_graph = pd.DataFrame(historique)
 
 # --- LE VERDICT ---
 st.divider()
-st.header("📊 Analyse de la Manœuvre")
-
-# Calcul des forces requises et disponibles
-force_requise_n = energie_joules / dist_cible if dist_cible > 0 else 0
-force_requise_t = force_requise_n / 9806.65
-force_dispo_totale_t = drag_moyen_t + force_machine_t + force_tugs_t + force_ancre_t
-
-# Sécurité anti-division par zéro
-if force_dispo_totale_t <= 0.1:
-    force_dispo_totale_t = 0.1
-
-# Calculs de distance et de temps
-dist_reelle = energie_joules / (force_dispo_totale_t * 9806.65)
-dist_inertie = energie_joules / (drag_moyen_t * 9806.65) if drag_moyen_t > 0 else float('inf')
-
-# Temps d'arrêt estimé ( t = 2d / v_i )
-if v_ms > 0:
-    temps_arret_sec = (2 * dist_reelle) / v_ms
-    temps_arret_min = temps_arret_sec / 60
-else:
-    temps_arret_min = 0
+st.header("📊 Verdict de la Simulation")
 
 r1, r2, r3 = st.columns(3)
 with r1:
-    st.metric(f"Force REQUISE ({int(dist_cible)}m)", f"{force_requise_t:.1f} T")
+    st.metric("Distance d'arrêt totale", f"{int(distance_parcourue)} m")
 with r2:
-    st.metric("Force DISPONIBLE", f"{force_dispo_totale_t:.1f} T", delta=f"{force_dispo_totale_t - force_requise_t:.1f} T de marge")
+    st.metric("Marge de sécurité", f"{int(dist_cible - distance_parcourue)} m")
 with r3:
-    st.metric("⏱️ Temps d'arrêt estimé", f"{temps_arret_min:.1f} minutes")
+    st.metric("Temps d'arrêt (Time to stop)", f"{int(t_sec/60)} min {int(t_sec%60)} s")
 
-# Visualisation dynamique de la distance
-st.markdown("### Projection Spatiale")
-if dist_reelle <= dist_cible:
-    st.success(f"✅ **ARRÊT SÉCURISÉ :** Le navire s'arrêtera à **{int(dist_reelle)}m** (Marge : {int(dist_cible - dist_reelle)}m).")
-    # Barre de progression personnalisée
-    ratio = dist_reelle / dist_cible
-    st.progress(ratio)
+if distance_parcourue <= dist_cible:
+    st.success(f"✅ **MANŒUVRE SÉCURISÉE :** Le navire casse son erre avec succès.")
+    st.progress(min(distance_parcourue / dist_cible, 1.0))
 else:
-    st.error(f"❌ **DANGER D'IMPACT :** Le navire dépassera la cible de **{int(dist_reelle - dist_cible)}m** (Arrêt total à {int(dist_reelle)}m).")
-    # Barre pleine en rouge pour indiquer le dépassement
-    st.markdown(f"""
-        <div style="width: 100%; background-color: #f0f2f6; border-radius: 5px;">
-            <div style="width: 100%; height: 15px; background-color: #ff4b4b; border-radius: 5px;"></div>
-        </div>
-    """, unsafe_allow_html=True)
-    st.write(f"⚠️ **Déficit de freinage :** Il manque {force_requise_t - force_dispo_totale_t:.1f} T de retenue.")
+    st.error(f"❌ **DANGER :** Dépassement de la zone de sécurité (Impact à {v_actuelle_ms/0.51444:.1f} nœuds).")
+    st.markdown(f"""<div style="width: 100%; height: 15px; background-color: #ff4b4b; border-radius: 5px;"></div>""", unsafe_allow_html=True)
 
-st.info(f"💡 **Inertie pure (Blackout total) :** Seule la friction de l'eau arrêtera le navire en **{int(dist_inertie)} mètres**.")
+# Graphique de Décélération
+st.subheader("📉 Courbe de Décélération : Vitesse vs Distance")
+if not df_graph.empty:
+    st.line_chart(df_graph, x="Distance (m)", y="Vitesse (noeuds)", height=350, use_container_width=True)
+
+# --- EXPORT DU RAPPORT ---
+st.divider()
+rapport_txt = f"""--- PASSAGE PLAN : KINETIC STOPPING PREDICTION ---
+Navire: {type_navire} (Displacement: {disp_t} T)
+Vitesse initiale SOG: {v_sog_kn} kn
+Courant: {courant_kn} kn | Vent: {vent_kn} kn
+Profondeur: {profondeur} m (h/T = {h_t_ratio:.2f})
+
+CONFIGURATION FREINAGE:
+- Machine: {pct_machine}% Astern (Délai réponse: {delai_machine} sec)
+- Remorqueurs: {nb_tugs}x {bp_tug}T BP
+- Ancres: {ancres}
+
+RESULTATS:
+- Distance d'arrêt calculée: {int(distance_parcourue)} mètres
+- Marge vs Cible ({dist_cible}m): {int(dist_cible - distance_parcourue)} mètres
+- Temps d'arrêt: {int(t_sec/60)} min {int(t_sec%60)} s
+------------------------------------------------"""
+
+st.download_button("📄 Télécharger le Rapport (Passage Plan)", data=rapport_txt, file_name="Passage_Plan_Stopping.txt", mime="text/plain")
 
 st.markdown("<br><br><br>", unsafe_allow_html=True)
 st.markdown(footer_style, unsafe_allow_html=True)
